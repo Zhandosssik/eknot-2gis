@@ -36,7 +36,7 @@ def init(recover_jobs=True):
         CREATE TABLE IF NOT EXISTS source_objects (
           source TEXT NOT NULL, source_id TEXT NOT NULL, object_type TEXT NOT NULL,
           name TEXT, address TEXT, building_id TEXT, lon REAL, lat REAL,
-          raw_json TEXT NOT NULL, collected_at TEXT NOT NULL,
+          raw_json TEXT NOT NULL, collected_at TEXT NOT NULL, krisha_city TEXT,
           PRIMARY KEY(source, source_id)
         );
         CREATE TABLE IF NOT EXISTS snapshots (
@@ -45,9 +45,20 @@ def init(recover_jobs=True):
         );
         CREATE INDEX IF NOT EXISTS idx_objects_building
           ON source_objects(source, building_id);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_job_page ON snapshots(job_id, page);
+        CREATE TABLE IF NOT EXISTS krisha_queue (
+          job_id TEXT NOT NULL, source_id TEXT NOT NULL, page INTEGER NOT NULL,
+          path TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, district TEXT,
+          PRIMARY KEY(job_id, source_id)
+        );
         ''')
+        con.execute('BEGIN IMMEDIATE')
+        if not any(column['name'] == 'district' for column in con.execute('PRAGMA table_info(krisha_queue)')):
+            con.execute('ALTER TABLE krisha_queue ADD COLUMN district TEXT')
+        if not any(column['name'] == 'krisha_city' for column in con.execute('PRAGMA table_info(source_objects)')):
+            con.execute('ALTER TABLE source_objects ADD COLUMN krisha_city TEXT')
         if recover_jobs:
-            con.execute("UPDATE jobs SET status='interrupted', error='Сервис остановился. Можно продолжить сбор.', updated_at=? WHERE source='2gis' AND status IN ('running','queued')", (now(),))
+            con.execute("UPDATE jobs SET status='interrupted', error='Сервис остановился. Можно продолжить сбор.', updated_at=? WHERE source IN ('2gis','krisha','korter') AND status IN ('running','queued')", (now(),))
 
 
 def job(job_id):
@@ -61,7 +72,7 @@ def job(job_id):
 
 
 def update_job(job_id, **values):
-    allowed = {'status', 'city_id', 'next_page', 'requests', 'processed', 'total', 'error'}
+    allowed = {'status', 'city_id', 'next_page', 'requests', 'processed', 'total', 'error', 'config'}
     if not set(values) <= allowed:
         raise ValueError('Invalid job field')
     values['updated_at'] = now()

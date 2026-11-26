@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ЖК Krisha.kz — Eknot</title>
+<style>
+body{font:16px system-ui,sans-serif;background:#f5f7fa;color:#17263b;margin:0}main{max-width:1400px;margin:auto;padding:32px}a{color:#205cbb}h1{margin-bottom:8px}p{line-height:1.5}.panel{background:white;border:1px solid #dbe2ec;border-radius:12px;padding:20px;margin:20px 0}.actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}button,input{font:inherit;padding:9px 12px;border-radius:6px;border:1px solid #b8c5d6}button{background:#205cbb;color:white;cursor:pointer}button:disabled{opacity:.5;cursor:default}input[type=number]{width:80px}#search{min-width:240px}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:12px;border-bottom:1px solid #e5eaf1;vertical-align:top}th{background:#eef3fa;white-space:nowrap}.scroll{overflow:auto}#notice{white-space:pre-wrap;color:#943118}pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}dialog{width:min(900px,90vw);max-height:85vh;border:1px solid #b8c5d6;border-radius:12px}small{color:#57697e}.status{font-weight:600}label{display:flex;gap:8px;align-items:center}
+select{font:inherit;padding:9px 12px;border-radius:6px;border:1px solid #b8c5d6;background:white;color:inherit}
+#pagination[hidden]{display:none}
+</style>
+<main><nav class="actions" aria-label="Источники"><a href="/docs">2ГИС / API</a><a id="nav-krisha" href="/krisha">Krisha.kz</a><a id="nav-korter" href="/korter">Korter.kz</a></nav>
+<h1 id="title">Жилые комплексы</h1>
+<label>Город <select id="city"><option value="astana">Астана</option><option value="almaty">Алматы</option></select></label>
+<section class="panel"><h2>Сбор данных</h2><div class="actions">
+<label>Режим <select id="mode"><option value="districts">По районам</option><option value="catalog">По страницам</option></select></label>
+<label>Страниц <input id="pages" type="number" min="1" max="200" value="10" required></label>
+<label>Запросов <input id="requests" type="number" min="1" max="500" value="15" required></label>
+<button id="start">Запустить сбор</button><button id="refresh">Обновить</button></div>
+<p><label><input id="apply-limits" type="checkbox"> Применить эти лимиты к продолжению задания</label></p>
+<p><small>В режиме «По районам» Eknot сначала сохраняет список ЖК из каталога. Затем собирает по одному району. <span id="district-order"></span> После завершения района следующий запускается отдельной кнопкой.</small></p>
+<div id="notice" role="alert"></div><div id="jobs"></div></section>
+<section class="panel"><div class="actions"><h2>Собранные ЖК <span id="count"></span></h2>
+<a id="xlsx">Скачать Excel</a><a id="csv">CSV</a><a id="json">Все данные JSON</a></div>
+<form id="filter" class="actions">
+<label>Район <select id="district"><option value="*">Все районы</option></select></label>
+<input id="search" placeholder="Название или адрес" aria-label="Название или адрес"><button>Найти</button></form>
+<p><small id="filter-note"></small></p>
+<p><small id="apartments-note"></small></p>
+<div class="scroll"><table><thead><tr><th>ЖК / адрес</th><th>Район</th><th>Застройщик</th><th>Статус / срок сдачи</th><th>Этажность / тип дома</th><th id="apartments-column">Всего квартир</th><th id="sales-column">Предложений</th><th>Цена м² от, ₸</th><th>Данные</th></tr></thead><tbody id="rows"></tbody></table></div>
+<p id="empty"></p><div id="pagination" class="actions"><button id="prev">Назад</button><span id="page"></span><button id="next">Далее</button></div></section>
+<dialog id="detail"><button id="close">Закрыть</button><h2 id="detail-title"></h2><pre id="detail-data"></pre></dialog>
+</main>
+<script>
+const $=id=>document.getElementById(id);let offset=0,search='',refreshId=0,loading=false,district='*',districtOptions='';const limit=25;
+const isKorter=location.pathname==='/korter';
+const source=isKorter?'korter':'krisha',sourceLabel=isKorter?'Korter.kz':'Krisha.kz';
+document.title=`ЖК ${sourceLabel} — Eknot`;
+$('title').textContent=`Жилые комплексы · ${sourceLabel}`;
+$('nav-'+source).setAttribute('aria-current','page');
+$('filter-note').textContent=isKorter
+ ?'Район берётся из карточки Korter.kz. Excel и CSV учитывают выбранный город и район.'
+ :'Район берётся из адреса Krisha.kz. Excel и CSV учитывают выбранные город и район.';
+$('apartments-note').textContent=isKorter
+ ?'Число квартир показано так, как его указал Korter, включая пометку об очереди. «—» означает, что значение не получено.'
+ :'«Всего квартир» — характеристика ЖК. «Предложений» — число предложений в карточке. «—» означает, что значение не получено.';
+if(isKorter){
+ $('apartments-column').textContent='Квартир (по Korter)';
+ $('sales-column').textContent='Статус продаж';
+}
+const citySelect=$('city');
+citySelect.value=new URLSearchParams(location.search).get('city')||'astana';
+if(!citySelect.value)citySelect.value='astana';
+let renderedRows='',detailRequest=0;
+const states={queued:'В очереди',running:'Сбор выполняется',limited:'Достигнут лимит',failed:'Ошибка',interrupted:'Прервано',district_completed:'Район собран',completed:'Выдача собрана'};
+async function api(url,body){const r=await fetch(url,body===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));return data}
+function value(v){return v===null||v===undefined||v===''?'—':String(v)}
+function cell(row,text){const td=document.createElement('td');td.textContent=value(text);row.append(td);return td}
+function districtQuery(){return district==='*'?'':'&district='+encodeURIComponent(district)}
+function cityQuery(){return 'city='+encodeURIComponent(citySelect.value)}
+function updateCityLinks(){
+ const base='/api/export?source='+source+'&'+cityQuery()+'&format=';
+ for(const format of ['xlsx','csv'])$(format).href=base+format+districtQuery();
+ $('json').href=base+'json';
+ $('district-order').textContent=citySelect.value==='astana'
+  ?'Сначала Нура и Есильский, затем остальные районы по алфавиту.'
+  :'Районы идут по алфавиту. ЖК без района обрабатываются последними.';
+}
+function readLimits(){
+ const pages=$('pages'),requests=$('requests');
+ if(!pages.reportValidity()||!requests.reportValidity())throw Error('Проверьте лимиты страниц и запросов.');
+ return {max_pages:pages.valueAsNumber,max_requests:requests.valueAsNumber};
+}
+function resumeCollection(id){
+ const limits=$('apply-limits').checked?'?'+new URLSearchParams(readLimits()):'';
+ return api('/api/jobs/'+id+'/resume'+limits,{});
+}
+async function showComplex(row){
+ const request=++detailRequest;
+ $('detail-title').textContent=row.name;
+ $('detail-data').textContent='Загрузка…';
+ $('detail').showModal();
+ try{
+  const result=await api('/api/objects/'+encodeURIComponent(row.source_id)+'?source='+source+'&'+cityQuery());
+  if(request===detailRequest)$('detail-data').textContent=JSON.stringify(result.data,null,2);
+ }catch(error){if(request===detailRequest)$('detail-data').textContent=error.message}
+}
+function updateRows(rows){
+ const signature=JSON.stringify(rows);
+ if(signature===renderedRows)return;
+ const content=document.createDocumentFragment();
+ for(const row of rows){
+  const tr=document.createElement('tr');
+  cell(tr,value(row.name)+'\n'+value(row.address));
+  cell(tr,row.district);
+  cell(tr,row.developer);
+  cell(tr,value(row.status)+' / '+value(row.completion));
+  cell(tr,value(row.floors)+' / '+value(row.home_type));
+  cell(tr,row.apartments);
+  cell(tr,isKorter?row.sales_status:row.offers_count);
+  cell(tr,typeof row.price_m2_from==='number'?row.price_m2_from.toLocaleString('ru-RU'):null);
+  const td=document.createElement('td'),button=document.createElement('button');
+  button.textContent='Подробнее';
+  button.onclick=()=>showComplex(row);
+  td.append(button);tr.append(td);content.append(tr);
+ }
+ $('rows').replaceChildren(content);
+ renderedRows=signature;
+}
+function updateDistricts(groups){
+ const total=groups.reduce((sum,group)=>sum+group.count,0);
+ const options=JSON.stringify(groups);
+ if(options!==districtOptions){
+  const districts=new Map(groups.map(group=>[group.district??'',group.count]));
+  if(district!=='*'&&!districts.has(district))districts.set(district,0);
+  $('district').replaceChildren(new Option(`Все районы (${total})`,'*'),
+   ...Array.from(districts,([name,count])=>new Option(`${name||'Район не указан'} (${count})`,name)));
+  $('district').value=district;
+  districtOptions=options;
+ }
+ const count=district==='*'?total:groups.find(group=>(group.district??'')===district)?.count??0;
+ $('count').textContent=`(${count})`;
+}
+async function refresh(){const id=++refreshId;loading=true;try{
+ const paginated=district==='*';
+ const paging=paginated?'&limit='+(limit+1)+'&offset='+offset:'';
+ const selectedCity=cityQuery();
+ const rowsUrl='/api/objects?source='+source+'&'+selectedCity+'&view=table&search='+encodeURIComponent(search)+districtQuery()+paging;
+ const [jobs,rows,districts]=await Promise.all([api('/api/jobs?source='+source+'&limit=10&'+selectedCity),api(rowsUrl),api('/api/'+source+'/districts?'+selectedCity)]);
+ if(id!==refreshId)return;
+ updateDistricts(districts);$('jobs').replaceChildren();
+ $('start').disabled=jobs.some(j=>['running','queued'].includes(j.status));
+ for(const j of jobs){const p=document.createElement('p'),span=document.createElement('span');
+ const stage=j.stage==='catalog'?`По районам: список ЖК, страниц просмотрено ${j.next_page-1}`:
+  j.stage==='districts'?(j.current_district?`По районам: ${j.current_district} (${j.district_processed} из ${j.district_total})`:'По районам'):'По страницам';
+ const districtComplete=j.status==='district_completed';
+ const status=states[j.status]||j.status;
+ const progress=districtComplete?`${status} · Следующий район: ${j.current_district}`:`${stage} · ${status}`;
+ span.textContent=progress+' · '+j.processed+' ЖК · '+j.requests+' запросов'+(j.error?' · '+j.error:'');p.append(span);
+ if(j.can_resume){const b=document.createElement('button');b.textContent=districtComplete?'Начать следующий район':'Продолжить';b.style.marginLeft='12px';b.onclick=()=>action(()=>resumeCollection(j.id));p.append(b)}$('jobs').append(p)}
+ updateRows(paginated?rows.slice(0,limit):rows);
+ $('pagination').hidden=!paginated;
+ $('empty').textContent=rows.length?'':'Нет результатов. Запустите сбор или измените поиск.';$('prev').disabled=offset===0;$('next').disabled=rows.length<=limit;$('page').textContent='Страница '+(offset/limit+1);
+ }catch(e){if(id===refreshId)$('notice').textContent=e.message}finally{if(id===refreshId)loading=false}}
+async function action(fn){$('notice').textContent='';try{await fn();await refresh()}catch(e){$('notice').textContent=e.message}}
+$('start').onclick=()=>action(()=>api('/api/'+source+'/jobs',{city:citySelect.value,mode:$('mode').value,...readLimits()}));$('refresh').onclick=refresh;$('filter').onsubmit=e=>{e.preventDefault();search=$('search').value.trim();offset=0;refresh()};$('prev').onclick=()=>{offset=Math.max(0,offset-limit);refresh()};$('next').onclick=()=>{offset+=limit;refresh()};$('close').onclick=()=>$('detail').close();
+$('mode').onchange=()=>{$('pages').value=$('mode').value==='districts'?10:1};
+$('district').onchange=()=>{
+ district=$('district').value;
+ offset=0;
+ updateCityLinks();
+ refresh();
+};
+citySelect.onchange=()=>{
+ history.replaceState(null,'','?'+cityQuery());
+ offset=0;
+ district='*';
+ search=$('search').value='';
+ districtOptions='';
+ $('jobs').replaceChildren();
+ $('notice').textContent='';
+ $('empty').textContent='Загрузка…';
+ $('pagination').hidden=true;
+ $('start').disabled=true;
+ updateDistricts([]);
+ updateRows([]);
+ updateCityLinks();
+ refresh();
+};
+updateCityLinks();
+refresh();
+setInterval(()=>{if(!loading)refresh()},5000);
+</script></html>

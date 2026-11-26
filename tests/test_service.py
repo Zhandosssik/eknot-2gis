@@ -132,12 +132,14 @@ class ServiceTests(unittest.TestCase):
         db.init()
         self.assertEqual(db.job(job_id)['status'], 'interrupted')
 
-    def test_only_twogis_is_exposed_with_legacy_source_data(self):
+    def test_sources_are_separate_and_legacy_krisha_cannot_resume(self):
         job_id = self.job()
         db.save_page(job_id, 1, {'result': {'items': [building()], 'total': 1}})
         with db.connect() as con:
             con.execute("""INSERT INTO jobs(id,source,status,config,created_at,updated_at)
-                           VALUES('legacy','krisha','limited','{}',?,?)""", (db.now(), db.now()))
+                           VALUES('legacy','krisha','limited',?,?,?)""",
+                        (json.dumps({'urls': [], 'max_pages': 1, 'max_objects': 3, 'max_requests': 4}),
+                         db.now(), db.now()))
             con.execute("""INSERT INTO source_objects(source,source_id,object_type,name,raw_json,collected_at)
                            VALUES('krisha','old','complex','Legacy complex','{}',?)""", (db.now(),))
         client = TestClient(app)
@@ -146,11 +148,11 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual([i['source'] for i in client.get('/api/export').json()], ['2gis'])
         self.assertNotIn('Legacy complex', client.get('/api/export?format=csv').text)
         self.assertEqual([j['id'] for j in client.get('/api/jobs').json()], [job_id])
-        self.assertEqual(client.get('/api/jobs/legacy').status_code, 404)
-        self.assertEqual(client.post('/api/jobs/legacy/resume').status_code, 404)
-        self.assertEqual(client.post('/api/krisha/jobs', json={}).status_code, 404)
-        self.assertEqual(client.get('/api/objects?source=krisha').status_code, 422)
-        self.assertNotIn('/api/krisha/jobs', client.get('/openapi.json').json()['paths'])
+        self.assertEqual(client.get('/api/jobs/legacy').status_code, 200)
+        self.assertFalse(client.get('/api/jobs?source=krisha').json()[0]['can_resume'])
+        self.assertEqual(client.post('/api/jobs/legacy/resume').status_code, 409)
+        self.assertEqual(client.get('/api/objects?source=krisha').json()[0]['source'], 'krisha')
+        self.assertIn('/api/krisha/jobs', client.get('/openapi.json').json()['paths'])
         with db.connect() as con:
             self.assertEqual(con.execute("SELECT count(*) FROM source_objects WHERE source='krisha'").fetchone()[0], 1)
 

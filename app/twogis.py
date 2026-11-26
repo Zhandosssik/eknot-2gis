@@ -89,7 +89,11 @@ def collect(job_id, transport=None):
     try:
         city_id = current['city_id'] or resolve_city(client)
         db.update_job(job_id, city_id=city_id)
-        fields = ['items.point', 'items.address', 'items.adm_div', 'items.reviews']
+        fields = ['items.point', 'items.address', 'items.full_address_name', 'items.adm_div',
+                  'items.reviews', 'items.floors', 'items.structure_info',
+                  'items.structure_info.apartments_count', 'items.structure_info.material',
+                  'items.structure_info.porch_count', 'items.structure_info.elevators_count',
+                  'items.structure_info.year_of_construction', 'items.has_apartments_info']
         if config['kind'] == 'organizations':
             fields += ['items.rubrics', 'items.schedule']
         fields += [f.strip() for f in os.getenv('TWOGIS_EXTRA_FIELDS', '').split(',') if f.strip()]
@@ -97,7 +101,9 @@ def collect(job_id, transport=None):
         for page in range(start_page, start_page + config['max_pages']):
             params = dict(page=page, page_size=10, fields=','.join(fields))
             if config['kind'] == 'buildings':
-                params.update(type='building', q=config['query'], city_id=city_id)
+                params.update(type='building', city_id=city_id)
+                if config['query'].strip():
+                    params['q'] = config['query']
             else:
                 # The building ID already restricts the search geographically.
                 # Combining city_id + building_id can return an empty result.
